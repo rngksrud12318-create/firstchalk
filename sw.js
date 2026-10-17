@@ -1,6 +1,6 @@
 // FirstChalk service worker: 앱 파일을 캐시해서 오프라인에서도 열리게 합니다.
 // 앱 파일을 수정해서 다시 배포할 때는 아래 버전 숫자를 올려주세요.
-const VERSION = 'firstchalk-v1';
+const VERSION = 'firstchalk-v2';
 const FILES = [
   './',
   'index.html',

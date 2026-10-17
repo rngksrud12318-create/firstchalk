@@ -15,7 +15,7 @@ const dateLabel = (s) => { const d = parseYmd(s); return `${d.getMonth() + 1}월
 const fmtMin = (ms) => {
   const m = Math.round(ms / 60000);
   const h = Math.floor(m / 60);
-  return h ? `${h}시간 ${m % 60}분` : `${m}분`;
+  return h ? (m % 60 ? `${h}시간 ${m % 60}분` : `${h}시간`) : `${m}분`;
 };
 const fmtClock = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -106,6 +106,41 @@ const subjChip = (id) => {
 const subjOptions = (sel) =>
   S.subjects.map((s) => `<option value="${s.id}" ${s.id === sel ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
 
+// 캘린더 칸에 들어갈 짧은 시간 표기 (45분, 1h20, 3h)
+const shortTime = (ms) => {
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}분`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return r ? `${h}h${pad(r)}` : `${h}h`;
+};
+// 공부 시간에 따른 색 단계: 0 없음, 1 1시간 미만, 2 1~3시간, 3 3시간 이상
+const levelOf = (ms) => (!ms ? 0 : ms < 3600000 ? 1 : ms < 3 * 3600000 ? 2 : 3);
+
+// 과목 선택 + 그 자리에서 새 과목 추가
+function subjPicker(key, sel, { optional = true, disabled = false } = {}) {
+  const attr = key === 'timer' ? 'data-change="tsubj"' : 'name="subjectId"';
+  return `<div class="row"><select class="grow" ${attr} ${disabled ? 'disabled' : ''}>${optional ? '<option value="">선택 안 함</option>' : ''}${subjOptions(sel)}</select>
+    <button type="button" class="btn ghost sm nowrap" data-a="subjadd" data-k="${key}" ${disabled ? 'disabled' : ''}>+ 과목</button></div>
+    ${ui.subjAdd === key ? `<div class="row" style="margin-top:8px"><input type="text" id="subj-new" maxlength="20" placeholder="새 과목 이름 (예: 교육학)" class="grow" enterkeyhint="done">
+    <button type="button" class="btn sm" data-a="subjsave" data-k="${key}">추가</button></div>` : ''}`;
+}
+
+// 다시 그릴 때 입력 중이던 폼 내용이 날아가지 않게 보존
+async function keepDraft(el, fn) {
+  const host = el.closest('form[data-form]');
+  const kind = host?.dataset.form;
+  const saved = host ? [...host.elements].filter((e) => e.name && e.name !== 'subjectId').map((e) => [e.name, e.value]) : [];
+  await fn();
+  const f = kind && $(`form[data-form="${kind}"]`);
+  if (f) saved.forEach(([n, v]) => { if (f.elements[n]) f.elements[n].value = v; });
+}
+
+function subjRows(bySubj) {
+  return Object.entries(bySubj).sort((a, b) => b[1] - a[1]).map(([id, ms]) => `
+    <div class="subj-row"><span class="swatch" style="--c:${subj(+id)?.color || '#B8A58F'}"></span>
+    <span class="grow">${esc(subj(+id)?.name || '삭제된 과목')}</span><span class="muted">${fmtMin(ms)}</span></div>`).join('');
+}
+
 // ───────────────────────── 타이머 상태 ─────────────────────────
 const POMO_MS = 25 * 60 * 1000;
 const blankTimer = (mode = 'free', subjectId = null) => ({ subjectId, mode, startedAt: null, acc: 0, runStart: null, notified: false });
@@ -139,7 +174,10 @@ const ui = {
   itopic: '',
   istar: false,
   range: 'week',
+  statMonth: today().slice(0, 7),
   timerSubject: null,
+  subjAdd: null,
+  pick: { note: null, todo: null },
   keepAwake: false
 };
 
@@ -175,8 +213,8 @@ function tomorrowBanner() {
 
 function todoItem(t) {
   return `<li class="todo ${t.done ? 'done' : ''}">
-    <button class="chk" data-a="todotoggle" data-id="${t.id}" aria-label="완료 체크">${t.done ? '✓' : ''}</button>
-    <div class="todo-body">
+    <button class="chk" data-a="todotoggle" data-id="${t.id}" aria-label="${t.done ? '완료 취소' : '완료 체크'}">${t.done ? '✓' : ''}</button>
+    <div class="todo-body" data-a="todotoggle" data-id="${t.id}">
       <div class="todo-title">${esc(t.title)}</div>
       ${t.memo ? `<div class="muted small">${esc(t.memo)}</div>` : ''}
       ${t.subjectId ? subjChip(t.subjectId) : ''}
@@ -193,6 +231,7 @@ function viewHome() {
   const bySubj = {};
   sess.forEach((s) => { bySubj[s.subjectId] = (bySubj[s.subjectId] || 0) + s.duration; });
   const todays = todosOn(td);
+  const doneN = todays.filter((t) => t.done).length;
   return `
     <h2>오늘 · ${dateLabel(td)}</h2>
     <div class="stats">
@@ -202,8 +241,12 @@ function viewHome() {
     ${Object.keys(bySubj).length ? `<div class="card" style="margin-top:10px">${Object.entries(bySubj).map(([id, ms]) => `
       <div class="subj-row"><span class="swatch" style="--c:${subj(+id)?.color || '#B8A58F'}"></span>
       <span class="grow">${esc(subj(+id)?.name || '삭제된 과목')}</span><span class="muted">${fmtMin(ms)}</span></div>`).join('')}</div>` : ''}
-    <h2>오늘 할 일</h2>
-    <div class="card">${todays.length ? `<ul class="todos">${todays.map(todoItem).join('')}</ul>` : '<div class="empty">오늘 등록된 할 일이 없어요.</div>'}</div>
+    <h2>오늘 할 일${todays.length ? ` · ${doneN}/${todays.length} 완료` : ''}</h2>
+    <div class="card">${todays.length ? `${doneN === todays.length ? '<div class="alldone-msg">오늘 할 일을 모두 해냈어요 👏</div>' : ''}<ul class="todos">${todays.map(todoItem).join('')}</ul>` : '<div class="empty">오늘 등록된 할 일이 없어요.</div>'}</div>
+    <form class="row" data-form="todo-today" style="margin-top:8px" autocomplete="off">
+      <input type="text" name="title" required maxlength="120" placeholder="오늘 할 일 바로 추가" class="grow">
+      <button class="btn" type="submit">추가</button>
+    </form>
     ${tomorrowBanner()}
     ${timerActive() ? `<div class="card" style="margin-top:10px"><div class="row"><div class="grow">진행 중인 타이머 · ${esc(subj(T.subjectId)?.name || '')}</div><button class="btn sm" data-a="tab" data-t="timer">보기</button></div></div>` : ''}
   `;
@@ -215,41 +258,50 @@ function viewCal() {
   const first = new Date(y, m - 1, 1).getDay();
   const days = new Date(y, m, 0).getDate();
   const td = today();
+  const mins = minutesByDate();
   const byDate = {};
   S.todos.forEach((t) => { (byDate[t.date] ||= []).push(t); });
   let cells = '';
+  let monthSum = 0;
   for (let i = 0; i < first; i++) cells += '<div class="cell blank"></div>';
   for (let d = 1; d <= days; d++) {
     const ds = `${y}-${pad(m)}-${pad(d)}`;
     const list = byDate[ds];
+    const ms = mins[ds] || 0;
+    monthSum += ms;
     const dow = (first + d - 1) % 7;
-    const cls = ['cell', dow === 0 ? 'sun' : '', ds === td ? 'today' : '', ds === ui.selDate ? 'sel' : ''].join(' ');
+    const cls = ['cell', `lv${levelOf(ms)}`, dow === 0 ? 'sun' : '', ds === td ? 'today' : '', ds === ui.selDate ? 'sel' : ''].join(' ');
     const dot = list ? `<span class="dot ${list.every((t) => t.done) ? 'alldone' : ''}"></span>` : '';
-    cells += `<button class="${cls}" data-a="pick" data-d="${ds}">${d}${dot}</button>`;
+    cells += `<button class="${cls}" data-a="pick" data-d="${ds}"><span class="num">${d}</span>${ms ? `<span class="ct">${shortTime(ms)}</span>` : ''}${dot}</button>`;
   }
   const sel = todosOn(ui.selDate);
+  const selSess = S.sessions.filter((s) => s.date === ui.selDate);
+  const selTotal = selSess.reduce((a, s) => a + s.duration, 0);
+  const selBy = {};
+  selSess.forEach((s) => { selBy[s.subjectId] = (selBy[s.subjectId] || 0) + s.duration; });
   return `
     <div class="card">
       <div class="cal-head">
         <button class="icon-btn" data-a="calprev" aria-label="이전 달">‹</button>
-        <div class="cal-title">${y}년 ${m}월</div>
+        <div class="center"><div class="cal-title">${y}년 ${m}월</div>
+          <div class="muted small">${monthSum ? `이번 달 공부 ${fmtMin(monthSum)}` : '공부 기록 없음'}</div></div>
         <div class="row" style="gap:2px">
           <button class="btn ghost sm" data-a="caltoday">오늘</button>
           <button class="icon-btn" data-a="calnext" aria-label="다음 달">›</button>
         </div>
       </div>
       <div class="cal-grid">${DOW.map((d) => `<div class="dow">${d}</div>`).join('')}${cells}</div>
+      <div class="legend"><i class="lv1"></i>1시간 미만<i class="lv2"></i>1~3시간<i class="lv3"></i>3시간 이상</div>
     </div>
     ${tomorrowBanner()}
+    <h2>${dateLabel(ui.selDate)} 공부</h2>
+    <div class="card">${selTotal ? `<div class="row"><b class="grow">총 ${fmtMin(selTotal)}</b></div>${subjRows(selBy)}` : '<div class="muted small">이 날의 공부 기록이 없어요.</div>'}</div>
     <h2>${dateLabel(ui.selDate)} 할 일</h2>
     <div class="card">${sel.length ? `<ul class="todos">${sel.map(todoItem).join('')}</ul>` : '<div class="empty">이 날의 할 일이 없어요.</div>'}</div>
     <form class="card stack" data-form="todo" style="margin-top:10px" autocomplete="off">
       <div><label class="f">할 일</label><input type="text" name="title" required maxlength="120" placeholder="예: 교육학 2단원 정리"></div>
-      <div class="row">
-        <div class="grow"><label class="f">과목 (선택)</label>
-          <select name="subjectId"><option value="">선택 안 함</option>${subjOptions()}</select></div>
-        <div class="grow"><label class="f">메모 (선택)</label><input type="text" name="memo" maxlength="200"></div>
-      </div>
+      <div><label class="f">메모 (선택)</label><input type="text" name="memo" maxlength="200"></div>
+      <div><label class="f">과목 (선택)</label>${subjPicker('todo', ui.pick.todo)}</div>
       <button class="btn block" type="submit">${dateLabel(ui.selDate)}에 추가</button>
     </form>`;
 }
@@ -280,8 +332,7 @@ function viewTimer() {
         <button data-a="mode" data-m="free" class="${T.mode === 'free' ? 'on' : ''}" ${active ? 'disabled' : ''}>일반</button>
         <button data-a="mode" data-m="pomo" class="${T.mode === 'pomo' ? 'on' : ''}" ${active ? 'disabled' : ''}>뽀모도로 25분</button>
       </div>
-      <div><label class="f">과목</label>
-        <select data-change="tsubj" ${active ? 'disabled' : ''}>${subjOptions(sid)}</select></div>
+      <div><label class="f">과목</label>${subjPicker('timer', sid, { optional: false, disabled: active })}</div>
       <div class="clock" id="clock">${clockText()}</div>
       <div class="clock-sub" id="clock-sub">${subClockText()}</div>
       <div class="row">
@@ -378,10 +429,8 @@ function viewNotes() {
   const list = [...S.notes].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
   return `
     <form class="card stack" data-form="note" autocomplete="off">
-      <div class="row">
-        <div class="grow"><label class="f">날짜</label><input type="date" name="date" required value="${today()}"></div>
-        <div class="grow"><label class="f">과목 (선택)</label><select name="subjectId"><option value="">선택 안 함</option>${subjOptions()}</select></div>
-      </div>
+      <div><label class="f">날짜</label><input type="date" name="date" required value="${today()}"></div>
+      <div><label class="f">과목 (선택)</label>${subjPicker('note', ui.pick.note)}</div>
       <div><label class="f">오늘 공부한 내용</label><textarea name="text" required style="min-height:72px" placeholder="한두 줄로 간단히 남겨요"></textarea></div>
       <button class="btn block" type="submit">기록하기</button>
     </form>
@@ -404,11 +453,23 @@ function viewStat() {
   const monthSum = Object.entries(m).filter(([d]) => d.startsWith(monthKey)).reduce((a, [, v]) => a + v, 0);
   const allSum = Object.values(m).reduce((a, v) => a + v, 0);
 
-  const from = ui.range === 'week' ? addDays(td, -6) : ui.range === 'month' ? `${monthKey}-01` : '0000-00-00';
+  const from = ui.range === 'week' ? addDays(td, -6) : '0000-00-00';
   const by = {};
   S.sessions.filter((s) => s.date >= from).forEach((s) => { by[s.subjectId] = (by[s.subjectId] || 0) + s.duration; });
-  const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
-  const top = rows.length ? rows[0][1] : 1;
+
+  // 선택한 달 통계
+  const sm = ui.statMonth;
+  const [sy, smo] = sm.split('-').map(Number);
+  const mDays = new Date(sy, smo, 0).getDate();
+  const daily = [];
+  for (let d = 1; d <= mDays; d++) { const ds = `${sm}-${pad(d)}`; daily.push([d, m[ds] || 0, ds]); }
+  const mTotal = daily.reduce((a, x) => a + x[1], 0);
+  const studied = daily.filter((x) => x[1]);
+  const best = studied.reduce((b, x) => (x[1] > b[1] ? x : b), [0, 0]);
+  const mMax = Math.max(best[1], 60 * 1000);
+  const mBy = {};
+  S.sessions.filter((s) => s.date.startsWith(sm)).forEach((s) => { mBy[s.subjectId] = (mBy[s.subjectId] || 0) + s.duration; });
+  const isNow = sm >= monthKey;
 
   return `
     <div class="stats">
@@ -422,14 +483,39 @@ function viewStat() {
       <div class="bar-col"><div class="bar-val">${v ? Math.round(v / 60000) + '분' : ''}</div>
       <div class="bar ${d === td ? 'today' : ''}" style="height:${Math.max(3, (v / max) * 100)}%"></div>
       <div class="bar-lbl">${DOW[parseYmd(d).getDay()]}</div></div>`).join('')}</div></div>
+    <h2>월별 통계</h2>
+    <div class="card">
+      <div class="cal-head">
+        <button class="icon-btn" data-a="smprev" aria-label="이전 달">‹</button>
+        <div class="cal-title">${sy}년 ${smo}월</div>
+        <button class="icon-btn" data-a="smnext" aria-label="다음 달" ${isNow ? 'disabled style="opacity:.3"' : ''}>›</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>${fmtMin(mTotal)}</b><span>총 공부 시간</span></div>
+        <div class="stat"><b>${studied.length}일</b><span>공부한 날 (${mDays}일 중)</span></div>
+        <div class="stat"><b>${studied.length ? fmtMin(mTotal / studied.length) : '-'}</b><span>공부한 날 하루 평균</span></div>
+        <div class="stat"><b>${best[1] ? fmtMin(best[1]) : '-'}</b><span>최고 기록${best[1] ? ` (${smo}/${best[0]})` : ''}</span></div>
+      </div>
+      <div class="bars dense">${daily.map(([d, v, ds]) => `
+        <div class="bar-col" title="${smo}/${d} ${v ? fmtMin(v) : ''}">
+        <div class="bar ${v ? '' : 'zero'} ${ds === td ? 'today' : ''}" style="height:${v ? Math.max(4, (v / mMax) * 100) : 2}%"></div>
+        <div class="bar-lbl">${d === 1 || d % 5 === 0 ? d : ''}</div></div>`).join('')}</div>
+      ${Object.keys(mBy).length ? `<div style="margin-top:10px">${subjBars(mBy)}</div>` : '<div class="empty">이 달에는 공부 기록이 없어요.</div>'}
+    </div>
     <h2>과목별 시간</h2>
     <div class="seg" style="margin-bottom:10px">
-      ${[['week', '7일'], ['month', '이번 달'], ['all', '전체']].map(([k, l]) => `<button data-a="range" data-r="${k}" class="${ui.range === k ? 'on' : ''}">${l}</button>`).join('')}
+      ${[['week', '최근 7일'], ['all', '전체']].map(([k, l]) => `<button data-a="range" data-r="${k}" class="${ui.range === k ? 'on' : ''}">${l}</button>`).join('')}
     </div>
-    <div class="card">${rows.length ? rows.map(([id, ms]) => `
-      <div style="padding:8px 0"><div class="row"><span class="swatch" style="--c:${subj(+id)?.color || '#B8A58F'}"></span>
-      <span class="grow">${esc(subj(+id)?.name || '삭제된 과목')}</span><span class="muted">${fmtMin(ms)}</span></div>
-      <div class="hbar" style="--c:${subj(+id)?.color || '#B8A58F'}"><i style="width:${(ms / top) * 100}%"></i></div></div>`).join('') : '<div class="empty">기록이 쌓이면 여기에 나타나요.</div>'}</div>`;
+    <div class="card">${Object.keys(by).length ? subjBars(by) : '<div class="empty">기록이 쌓이면 여기에 나타나요.</div>'}</div>`;
+}
+
+function subjBars(by) {
+  const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
+  const top = rows.length ? rows[0][1] : 1;
+  return rows.map(([id, ms]) => `
+    <div style="padding:8px 0"><div class="row"><span class="swatch" style="--c:${subj(+id)?.color || '#B8A58F'}"></span>
+    <span class="grow">${esc(subj(+id)?.name || '삭제된 과목')}</span><span class="muted">${fmtMin(ms)}</span></div>
+    <div class="hbar" style="--c:${subj(+id)?.color || '#B8A58F'}"><i style="width:${(ms / top) * 100}%"></i></div></div>`).join('');
 }
 
 // ───────────────────────── 화면: 설정 ─────────────────────────
@@ -477,7 +563,11 @@ const actions = {
 
   async todotoggle(a) {
     const t = S.todos.find((x) => x.id === +a.dataset.id);
-    if (t) { t.done = !t.done; await dbPut('todos', t); await refresh('todos'); render(); }
+    if (t) {
+      t.done = !t.done;
+      await dbPut('todos', t); await refresh('todos'); render();
+      if (t.done) toast('해냈어요! 👏');
+    }
   },
   async tododel(a) { await dbDel('todos', +a.dataset.id); await refresh('todos'); render(); },
 
@@ -533,6 +623,35 @@ const actions = {
   },
 
   range: (a) => { ui.range = a.dataset.r; render(); },
+  smprev: () => { const [y, m] = ui.statMonth.split('-').map(Number); ui.statMonth = ymd(new Date(y, m - 2, 1)).slice(0, 7); render(); },
+  smnext: () => {
+    const [y, m] = ui.statMonth.split('-').map(Number);
+    const next = ymd(new Date(y, m, 1)).slice(0, 7);
+    if (next <= today().slice(0, 7)) { ui.statMonth = next; render(); }
+  },
+
+  subjadd(a) {
+    ui.subjAdd = ui.subjAdd === a.dataset.k ? null : a.dataset.k;
+    keepDraft(a, () => render()).then(() => $('#subj-new')?.focus());
+  },
+  async subjsave(a) {
+    const key = a.dataset.k;
+    const inp = $('#subj-new');
+    const name = inp?.value.trim();
+    if (!name) { inp?.focus(); return; }
+    await keepDraft(a, async () => {
+      let s = S.subjects.find((x) => x.name === name);
+      if (!s) {
+        const id = await dbPut('subjects', { name, color: nextColor() });
+        await refresh('subjects');
+        s = subj(id);
+        toast(`'${name}' 과목을 추가했어요`);
+      }
+      if (key === 'timer') ui.timerSubject = s.id; else ui.pick[key] = s.id;
+      ui.subjAdd = null;
+      render();
+    });
+  },
 
   async subjdel(a) {
     const s = subj(+a.dataset.id);
@@ -567,6 +686,10 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  if (e.target.name === 'subjectId') {
+    const formKind = e.target.closest('form')?.dataset.form;
+    if (formKind in ui.pick) ui.pick[formKind] = e.target.value ? +e.target.value : null;
+  }
   const k = e.target.dataset.change;
   if (!k) return;
   if (k === 'tsubj') { ui.timerSubject = +e.target.value; }
@@ -579,6 +702,14 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.dataset.input === 'iq') { ui.iq = e.target.value; renderIList(); }
+});
+
+// 새 과목 입력칸에서 Enter = 추가 (한글 조합 중에는 무시)
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'subj-new' && e.key === 'Enter' && !e.isComposing) {
+    e.preventDefault();
+    $('[data-a="subjsave"]')?.click();
+  }
 });
 
 document.addEventListener('submit', async (e) => {
@@ -594,6 +725,9 @@ document.addEventListener('submit', async (e) => {
       subjectId: f.get('subjectId') ? +f.get('subjectId') : null, done: false
     });
     await refresh('todos'); render(); toast('할 일을 추가했어요');
+  } else if (kind === 'todo-today') {
+    await dbPut('todos', { title: f.get('title').trim(), memo: '', date: today(), subjectId: null, done: false });
+    await refresh('todos'); render(); toast('오늘 할 일에 추가했어요');
   } else if (kind === 'subject') {
     const name = f.get('name').trim();
     if (!name) return;
