@@ -784,5 +784,15 @@ $('#import-file').addEventListener('change', async (e) => {
   if (T.startedAt && T.runStart && ui.keepAwake) setWake(true);
   render();
   setInterval(tick, 1000);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // 새 버전이 설치되면 한 번 자동으로 새로고침해서 바로 반영
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch(() => {});
+  }
 })();

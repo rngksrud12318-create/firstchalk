@@ -1,6 +1,7 @@
-// FirstChalk service worker: 앱 파일을 캐시해서 오프라인에서도 열리게 합니다.
-// 앱 파일을 수정해서 다시 배포할 때는 아래 버전 숫자를 올려주세요.
-const VERSION = 'firstchalk-v2';
+// FirstChalk service worker
+// 인터넷이 될 때는 항상 GitHub에서 최신 파일을 받아오고(네트워크 우선),
+// 인터넷이 안 될 때만 저장해 둔 파일로 열어요. 그래서 새로 올린 파일이 자동으로 반영돼요.
+const VERSION = 'firstchalk-v3';
 const FILES = [
   './',
   'index.html',
@@ -13,7 +14,12 @@ const FILES = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(VERSION)
+      // cache: 'reload' = 브라우저 임시 저장본 말고 서버에서 새로 받기
+      .then((c) => c.addAll(FILES.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -25,11 +31,21 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
+  const req = e.request;
+  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   e.respondWith(
-    caches.match(e.request).then((hit) => {
-      if (hit) return hit;
-      return fetch(e.request).catch(() => caches.match('index.html'));
-    })
+    fetch(req.url, { cache: 'no-cache' })
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(VERSION).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() =>
+        caches.match(req, { ignoreSearch: true })
+          .then((hit) => hit || (req.mode === 'navigate' ? caches.match('index.html') : undefined))
+          .then((hit) => hit || Response.error())
+      )
   );
 });
